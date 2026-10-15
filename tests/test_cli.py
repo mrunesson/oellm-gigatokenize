@@ -24,44 +24,47 @@ def documents(prefix: Path) -> list[list[int]]:
 
 
 def test_end_to_end_with_gigatoken(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:
-    output = tmp_path / "out" / "corpus"
+    output = tmp_path / "out"
+    args = [str(input_dir), str(output), "-t", str(tiny_tokenizer_json), "-n", "2", "-w", "2", "--eod-token", EOT]
 
-    exit_code = main([str(input_dir), str(output), "-t", str(tiny_tokenizer_json), "-n", "2", "--eod-token", EOT])
+    assert main(args) == 0
 
-    assert exit_code == 0
-    result = documents(output)
-    assert len(result) == 5
-    assert result[0] == [256, ord(" "), ord("c"), 257]
-    assert result[3] == [256, 257]
-    assert all(doc[-1] == 257 for doc in result)
-    summary = json.loads((tmp_path / "out" / "corpus.json").read_text())
+    assert documents(output / "shard-000") == [[256, ord(" "), ord("c"), 257], [*b"hello", 257]]
+    assert documents(output / "shard-001") == [[*b"second file", 257]]
+    assert documents(output / "shard-002") == [[256, 257], [*b"third file", 257]]
+    summary = json.loads((output / "_summary.json").read_text())
     assert summary["config"]["tokenizer"] == str(tiny_tokenizer_json)
     assert summary["config"]["eod_id"] == 257
+    assert summary["config"]["num_partitions"] == 2
+    assert summary["config"]["workers"] == 2
     assert summary["totals"]["documents"] == 5
 
 
+def test_defaults_to_one_partition_and_one_worker(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:
+    assert main([str(input_dir), str(tmp_path / "out"), "-t", str(tiny_tokenizer_json)]) == 0
+    config = json.loads((tmp_path / "out" / "_summary.json").read_text())["config"]
+    assert (config["num_partitions"], config["workers"]) == (1, 1)
+
+
 def test_eos_is_the_default_eod_token(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:
-    output = tmp_path / "corpus"
-    assert main([str(input_dir), str(output), "-t", str(tiny_tokenizer_json), "-n", "1"]) == 0
-    assert all(doc[-1] == 258 for doc in documents(output))
+    assert main([str(input_dir), str(tmp_path / "out"), "-t", str(tiny_tokenizer_json)]) == 0
+    assert all(doc[-1] == 258 for doc in documents(tmp_path / "out" / "shard-000"))
 
 
 def test_eod_token_id(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:
-    output = tmp_path / "corpus"
-    assert main([str(input_dir), str(output), "-t", str(tiny_tokenizer_json), "-n", "1", "--eod-token-id", "0"]) == 0
-    assert all(doc[-1] == 0 for doc in documents(output))
+    assert main([str(input_dir), str(tmp_path / "out"), "-t", str(tiny_tokenizer_json), "--eod-token-id", "0"]) == 0
+    assert all(doc[-1] == 0 for doc in documents(tmp_path / "out" / "shard-000"))
 
 
 def test_without_eod(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:
-    output = tmp_path / "corpus"
-    assert main([str(input_dir), str(output), "-t", str(tiny_tokenizer_json), "-n", "3", "--no-eod"]) == 0
-    assert documents(output)[1] == list(b"hello")
+    assert main([str(input_dir), str(tmp_path / "out"), "-t", str(tiny_tokenizer_json), "-n", "3", "--no-eod"]) == 0
+    assert documents(tmp_path / "out" / "shard-000")[1] == list(b"hello")
 
 
 def test_keep_partitions_and_work_dir(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:
-    args = [str(input_dir), str(tmp_path / "corpus"), "-t", str(tiny_tokenizer_json), "-n", "3"]
+    args = [str(input_dir), str(tmp_path / "out"), "-t", str(tiny_tokenizer_json), "-n", "3"]
     assert main([*args, "--keep-partitions", "--work-dir", str(tmp_path / "work")]) == 0
-    assert len(list((tmp_path / "work").glob("*.idx"))) == 3
+    assert len(list((tmp_path / "work").rglob("*.idx"))) == 3 * len(CORPUS)
 
 
 @pytest.mark.parametrize(
@@ -98,8 +101,9 @@ def test_missing_input_directory(tmp_path: Path, tiny_tokenizer_json: Path) -> N
 @pytest.mark.parametrize(
     "args",
     [
-        ["in", "out", "-t", "tok"],  # missing partitions
+        ["in"],  # missing output directory
         ["in", "out", "-t", "tok", "-n", "0"],
+        ["in", "out", "-t", "tok", "-w", "0"],
         ["in", "out", "-t", "tok", "-n", "2", "--eod-token", "x", "--eod-token-id", "1"],
         ["in", "out", "-t", "tok", "-n", "2", "--eod-token", "x", "--no-eod"],
     ],
@@ -127,3 +131,4 @@ def test_runs_as_module() -> None:
         [sys.executable, "-m", "oellm_gigatokenize", "--help"], capture_output=True, text=True, check=True
     )
     assert "--num-partitions" in result.stdout
+    assert "--workers" in result.stdout

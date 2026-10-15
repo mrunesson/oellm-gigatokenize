@@ -1,6 +1,7 @@
 """Shared test fixtures and helpers."""
 
 import json
+import threading
 from collections.abc import Iterable
 from pathlib import Path
 
@@ -31,19 +32,26 @@ def write_corpus(directory: Path, documents_per_file: list[list[str]]) -> list[s
 
 
 class ByteEncoder:
-    """A deterministic fake encoder: one token per UTF-8 byte, offset by one so 0 is free."""
+    """A deterministic fake encoder: one token per UTF-8 byte, offset by one so 0 is free.
+
+    Records how often and from which threads it is called.
+    """
 
     def __init__(self, vocab_size: int = 300, name: str = "bytes") -> None:
         self.vocab_size = vocab_size
         self.name = name
         self.fingerprint = f"fake:{name}"
         self.calls = 0
+        self.threads: set[str] = set()
+        self._lock = threading.Lock()
 
     def encode(self, text: str) -> np.ndarray:
         return np.frombuffer(text.encode(), dtype=np.uint8).astype(np.uint32) + 1
 
     def encode_batch(self, texts: list[str]) -> EncodedBatch:
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
+            self.threads.add(threading.current_thread().name)
         encoded = [self.encode(t) for t in texts]
         tokens = np.concatenate(encoded) if encoded else np.empty(0, np.uint32)
         return EncodedBatch(tokens=tokens, lengths=np.array([len(e) for e in encoded], dtype=np.int64))

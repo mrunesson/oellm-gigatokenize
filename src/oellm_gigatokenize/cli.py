@@ -28,16 +28,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="oellm-gigatokenize",
         description=(
-            "Tokenize a directory of zstd-compressed JSON Lines files with Gigatoken and write "
-            "a Megatron-LM bin/idx dataset. Files are tokenized in partitions that are stored "
-            "one at a time and merged at the end; re-running reuses finished partitions."
+            "Tokenize a directory of zstd-compressed JSON Lines files with Gigatoken. Every input "
+            "file becomes one Megatron-LM bin/idx dataset in the output directory. Files can be "
+            "split into partitions that are tokenized by worker threads and merged per file; "
+            "re-running reuses finished files and partitions."
         ),
     )
     parser.add_argument("input_dir", type=Path, help="directory containing *.jsonl.zst files (searched recursively)")
     parser.add_argument(
-        "output_prefix",
+        "output_dir",
         type=Path,
-        help="output path without extension; writes <prefix>.bin and <prefix>.idx",
+        help="directory for the output; input a/b.jsonl.zst becomes a/b.bin, a/b.idx and a/b.json",
     )
     parser.add_argument(
         "-t",
@@ -49,8 +50,15 @@ def build_parser() -> argparse.ArgumentParser:
         "-n",
         "--num-partitions",
         type=_positive_int,
-        required=True,
-        help="number of partitions to split the input files into (capped at the number of files)",
+        default=1,
+        help="round-robin partitions per input file; document i goes to partition i %% n (default: %(default)s)",
+    )
+    parser.add_argument(
+        "-w",
+        "--workers",
+        type=_positive_int,
+        default=1,
+        help="number of worker threads processing partitions; 1 runs without threads (default: %(default)s)",
     )
     parser.add_argument(
         "--text-key", default="text", help="JSON field holding the document text (default: %(default)s)"
@@ -74,7 +82,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--work-dir",
         type=Path,
-        help="where partitions are stored (default: <output_prefix>.partitions)",
+        help="where partitions are stored (default: <output_dir>/.partitions)",
     )
     parser.add_argument("--keep-partitions", action="store_true", help="keep the partition files after merging")
     parser.add_argument("-v", "--verbose", action="store_true", help="enable debug logging")
@@ -102,8 +110,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         eod_id = _resolve_eod_id(args, encoder)
         config = PipelineConfig(
             input_dir=args.input_dir,
-            output_prefix=args.output_prefix,
+            output_dir=args.output_dir,
             num_partitions=args.num_partitions,
+            workers=args.workers,
             text_key=args.text_key,
             pattern=args.pattern,
             batch_bytes=args.batch_bytes,
@@ -116,16 +125,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         logger.error("%s", exc)
         return 1
     except KeyboardInterrupt:
-        logger.error("Interrupted; finished partitions are kept and will be reused on the next run")
+        logger.error("Interrupted; finished files and partitions are kept and will be reused on the next run")
         return 130
 
     logger.info(
-        "Wrote %d documents and %d tokens to %s.{bin,idx,json} in %.1fs "
-        "(%d of %d partitions reused, %d empty documents skipped)",
+        "Wrote %d documents and %d tokens from %d files to %s in %.1fs "
+        "(%d files and %d of %d partitions reused, %d empty documents skipped)",
         summary.documents,
         summary.tokens,
-        summary.output_prefix,
+        len(summary.files),
+        args.output_dir,
         summary.total_seconds,
+        summary.reused_files,
         summary.reused_partitions,
         summary.num_partitions,
         summary.empty_documents,

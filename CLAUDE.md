@@ -11,26 +11,26 @@ uv run pytest -m "not network"            # skip tests that download tokenizers 
 uv run pytest tests/test_pipeline.py::TestResume::test_reuses_finished_partitions   # single test
 uv run ruff format . && uv run ruff check .
 uvx ty check src tests                    # type check
-uv run oellm-gigatokenize INPUT_DIR OUT_PREFIX -n 16   # run the CLI
+uv run oellm-gigatokenize INPUT_DIR OUT_DIR -n 8 -w 4   # run the CLI
 ```
 
 ## What the tool does
 
-`oellm-gigatokenize` tokenizes a directory of `*.jsonl.zst` files with Gigatoken and writes one Megatron-LM `MMapIndexedDataset` (`<prefix>.bin` + `<prefix>.idx`). Defaults: tokenizer `openeurollm/tokenizer-256k-v2`, and `<eos>` appended after every document (`--no-eod` disables it).
+`oellm-gigatokenize` tokenizes a directory of `*.jsonl.zst` files with Gigatoken. Each input file becomes one Megatron-LM `MMapIndexedDataset` in the output directory (`a/b.jsonl.zst` → `OUT/a/b.bin`, `.idx`, `.json`), plus `OUT/_summary.json` for the run. `-n` deals each file's documents round robin over n partitions. Defaults: tokenizer `openeurollm/tokenizer-256k-v2`, `<eos>` appended after every document (`--no-eod` disables it), 1 partition per file, 1 worker.
 
 ## Architecture
 
-The data flow is `cli.main` → `pipeline.run(config, encoder)`:
+The data flow is `cli.main` → `pipeline.run(config, encoder)`. Each file is split into `num_partitions` tasks plus a merge task, run by an executor from `executor.make_executor` (`InlineExecutor` in the main thread for `workers == 1`, else a `ThreadPoolExecutor`):
 
-1. `reader.discover_files` finds the inputs (recursive, sorted). `partitioning.split_into_partitions` groups them into contiguous, order-preserving partitions balanced by compressed size. Files are never split, so the partition count is capped at the file count.
-2. For each partition, `pipeline.tokenize_partition` streams documents (`reader.iter_documents` → `iter_batches` by `--batch-bytes`) through the encoder and appends each batch to a `DatasetWriter`. Memory is bounded by the batch size, not the partition size.
-3. `indexed_dataset.merge_datasets` concatenates the partition `.bin` files and rebuilds the index, then the partitions are removed unless `--keep-partitions` is set.
-4. `PipelineSummary.write` saves `<prefix>.json` (config, timing, totals, per-partition stats). Its shape is defined by the `to_dict` methods on `PipelineSummary`, `PipelineConfig` and `PartitionResult`.
+1. `tokenize_partition`: partition k streams the whole file but keeps only non-blank rows `i` with `i % n == k` (`reader.iter_rows` → `partitioning.round_robin` → `parse_document`). It tokenizes them in batches into a partition `DatasetWriter`, and checks a `stop` event between batches so a failure elsewhere aborts it.
+2. `finalize_file`: concatenates the partitions in partition order into the file's output (or moves the single partition), writes `<name>.json`, and removes the partitions. The output order is round robin (0, n, 2n, …, 1, n+1, …), not the input order. Tests rely on this via `round_robin_order`.
+
+`_Scheduler` submits tasks and runs their continuations in the main thread, in submission order, which keeps the inline mode deterministic. `fill()` starts a new file only while fewer than `workers` partitions are outstanding, which bounds how many partitions are on disk. On any exception the stop event is set and queued futures are cancelled. Results and JSON shapes live in `results.py` (`PartitionResult`, `FileResult`, `RunSummary`, each with `to_dict`).
 
 Key design points that span files:
 
 - **Encoder protocol** (`tokenization.Encoder`): the pipeline depends only on `name`, `vocab_size`, `fingerprint` and `encode_batch(list[str]) -> EncodedBatch`. `GigatokenEncoder` is the real implementation. Tests inject `tests.conftest.ByteEncoder` (one token per UTF-8 byte, +1 offset). `EncodedBatch` is a flat token array plus per-document lengths. EOD appending (`with_eod`) and empty-document dropping (`drop_empty`) are applied by the pipeline, not by the encoder.
-- **Resume/atomicity**: `DatasetWriter` writes `*.bin.tmp`/`*.idx.tmp` and renames them into place on `finalize()`, `.bin` first and then `.idx`. Each finished partition gets a `part-NNNNN.json` `PartitionManifest` (input file paths and sizes, encoder `fingerprint`, text key, eod id, dtype). The manifest file is `{"inputs": ..., "stats": ...}`. A partition is reused only when `inputs` matches exactly, so any new setting that affects output must be added to `PartitionManifest`, or stale partitions will be reused. `stats` lets reused partitions still report accurate numbers in the summary.
+- **Resume/atomicity**: `DatasetWriter` writes `*.bin.tmp`/`*.idx.tmp` and renames them into place on `finalize()`, `.bin` first and then `.idx`. Manifests are `{"inputs": ..., "result": ...}` JSON (`results.write_json` / `load_if_matching`). There are two levels: `OUT/<name>.json` per finished file (`FileJob.inputs`, which includes `num_partitions`) and `<work_dir>/<name>/part-NNNNN.json` per partition (`FileJob.partition_inputs`, which adds the partition number). Work is reused only when `inputs` match exactly, so any new setting that affects output must be added to `FileJob.inputs`, or stale results will be reused. `batch_bytes` and `workers` are deliberately excluded because they don't change the output.
 - **Megatron format**: `indexed_dataset.py` documents the `.idx` layout in its module docstring. Every document is exactly one sequence (`document_indices = [0..N]`), but `merge_datasets` preserves multi-sequence documents from external datasets. The token dtype comes from `optimal_dtype`, which mirrors Megatron: `uint16` if vocab < 65500, else `int32` (so the default 262k tokenizer produces `int32`).
 - **Gigatoken specifics**: `gigatoken.Tokenizer(name_or_path)` loads HF Hub ids or local `tokenizer.json`. `encode_batch` returns an awkward array, which is flattened with `ak.flatten` / `ak.num`. The HF compat layer does not expose `eos_token_id`, so EOD ids are resolved by encoding the token string and requiring exactly one id (`GigatokenEncoder.token_to_id`). Special-token strings that appear in raw text are encoded as special tokens.
 

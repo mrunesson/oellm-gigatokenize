@@ -3,8 +3,15 @@ from pathlib import Path
 import pytest
 import zstandard
 
-from oellm_gigatokenize.reader import InputFormatError, discover_files, iter_batches, iter_documents
+from oellm_gigatokenize.reader import InputFormatError, discover_files, iter_batches, iter_documents, iter_rows
 from tests.conftest import write_jsonl_zst
+
+
+def write_zst(path: Path, data: bytes, frames: int = 1) -> Path:
+    compressor = zstandard.ZstdCompressor()
+    step = max(1, -(-len(data) // frames))
+    path.write_bytes(b"".join(compressor.compress(data[i : i + step]) for i in range(0, max(len(data), 1), step)))
+    return path
 
 
 class TestDiscoverFiles:
@@ -71,6 +78,37 @@ class TestIterDocuments:
         path.write_bytes(zstandard.ZstdCompressor().compress(b'{"text": "ok"}\n' + payload))
         with pytest.raises(InputFormatError, match=rf"bad\.jsonl\.zst:2: .*{message}"):
             list(iter_documents(path))
+
+    def test_round_robin_partitions(self, tmp_path: Path) -> None:
+        path = write_jsonl_zst(tmp_path / "f.jsonl.zst", [{"text": f"d{i}"} for i in range(7)])
+        assert [list(iter_documents(path, partition=k, num_partitions=3)) for k in range(3)] == [
+            ["d0", "d3", "d6"],
+            ["d1", "d4"],
+            ["d2", "d5"],
+        ]
+
+    def test_blank_lines_are_not_documents(self, tmp_path: Path) -> None:
+        path = write_zst(tmp_path / "f.jsonl.zst", b'{"text": "a"}\n\n{"text": "b"}\n  \n{"text": "c"}\n')
+        assert list(iter_documents(path, partition=1, num_partitions=2)) == ["b"]
+
+    def test_only_parses_rows_of_its_partition(self, tmp_path: Path) -> None:
+        path = write_zst(tmp_path / "f.jsonl.zst", b'{"text": "a"}\nnot json\n{"text": "c"}\n')
+        assert list(iter_documents(path, partition=0, num_partitions=2)) == ["a", "c"]
+        with pytest.raises(InputFormatError, match=r"f\.jsonl\.zst:2: invalid JSON"):
+            list(iter_documents(path, partition=1, num_partitions=2))
+
+
+class TestIterRows:
+    def test_line_numbers_skip_blank_lines(self, tmp_path: Path) -> None:
+        path = write_zst(tmp_path / "f.zst", b"ab\n\ncde\nf")
+        assert list(iter_rows(path)) == [(1, b"ab\n"), (3, b"cde\n"), (4, b"f")]
+
+    def test_reads_across_frames(self, tmp_path: Path) -> None:
+        path = write_zst(tmp_path / "f.zst", b"".join(b"row %d\n" % i for i in range(100)), frames=4)
+        assert [n for n, _ in iter_rows(path)] == list(range(1, 101))
+
+    def test_empty_file(self, tmp_path: Path) -> None:
+        assert list(iter_rows(write_zst(tmp_path / "f.zst", b""))) == []
 
 
 class TestIterBatches:
