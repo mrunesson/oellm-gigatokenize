@@ -1,0 +1,45 @@
+[project]
+name = "oellm-gigatokenize"
+version = "0.1.0"
+description = "Tokenize zstd-compressed JSON Lines corpora with Gigatoken into Megatron-LM bin/idx datasets"
+readme = "README.md"
+authors = [
+    { name = "Magnus Runesson", email = "Magnus.Runesson@ai.se" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "awkward>=2.6",
+    "gigatoken>=0.10.0",
+    "numpy>=2.0",
+    "orjson>=3.10",
+    "zstandard>=0.23",
+]
+
+[project.scripts]
+oellm-gigatokenize = "oellm_gigatokenize.cli:main"
+
+[build-system]
+requires = ["uv_build>=0.13.1,<0.14.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0",
+    "pytest-cov>=7.0",
+    "ruff>=0.15",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["--strict-markers", "-ra"]
+markers = ["network: tests that download tokenizers from the HuggingFace Hub (deselect with -m 'not network')"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF", "PT", "PTH", "N"]
+
+[tool.coverage.run]
+source = ["oellm_gigatokenize"]
