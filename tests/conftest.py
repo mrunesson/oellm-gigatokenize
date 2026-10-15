@@ -12,6 +12,7 @@ import zstandard
 from oellm_gigatokenize.tokenization import EncodedBatch
 
 EOT = "<|endoftext|>"
+EOS = "<eos>"
 
 
 def write_jsonl_zst(path: Path, records: Iterable[object]) -> Path:
@@ -67,7 +68,7 @@ def _bytes_to_unicode() -> dict[int, str]:
 
 @pytest.fixture(scope="session")
 def tiny_tokenizer_json(tmp_path_factory: pytest.TempPathFactory) -> Path:
-    """A minimal byte-level BPE tokenizer.json: 256 byte tokens, one merge ("ab"), and EOT.
+    """A minimal byte-level BPE tokenizer.json: 256 byte tokens, one merge ("ab"), EOT and EOS.
 
     Lets the real Gigatoken backend be tested without network access.
     """
@@ -87,7 +88,16 @@ def tiny_tokenizer_json(tmp_path_factory: pytest.TempPathFactory) -> Path:
                 "rstrip": False,
                 "normalized": False,
                 "special": True,
-            }
+            },
+            {
+                "id": 258,
+                "content": EOS,
+                "single_word": False,
+                "lstrip": False,
+                "rstrip": False,
+                "normalized": False,
+                "special": True,
+            },
         ],
         "normalizer": None,
         "pre_tokenizer": {"type": "ByteLevel", "add_prefix_space": False, "trim_offsets": True, "use_regex": True},

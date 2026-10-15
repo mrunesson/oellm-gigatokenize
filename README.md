@@ -17,14 +17,15 @@ Each partition is written to temporary files and only moved into place when it i
 
 ```bash
 uv sync
-uv run oellm-gigatokenize INPUT_DIR OUTPUT_PREFIX --tokenizer Qwen/Qwen3-8B --num-partitions 16 --eod-token "<|endoftext|>"
+uv run oellm-gigatokenize INPUT_DIR OUTPUT_PREFIX --num-partitions 16
 ```
 
 | Option | Description |
 |---|---|
-| `-t, --tokenizer` | HuggingFace Hub repo id or a local `tokenizer.json` / directory (required) |
+| `-t, --tokenizer` | HuggingFace Hub repo id or a local `tokenizer.json` / directory (default `openeurollm/tokenizer-256k-v2`) |
 | `-n, --num-partitions` | Number of partitions (required; capped at the number of files) |
-| `--eod-token` / `--eod-token-id` | Token appended after every document (off by default) |
+| `--eod-token` / `--eod-token-id` | Token appended after every document (default `<eos>`) |
+| `--no-eod` | Do not append an end-of-document token |
 | `--text-key` | JSON field containing the text (default `text`) |
 | `--pattern` | Glob for input files (default `*.jsonl.zst`) |
 | `--batch-bytes` | Text per tokenizer call; bounds memory (default 256 MiB) |
@@ -43,7 +44,7 @@ Notes:
 ```bash
 uv sync                         # install runtime and dev dependencies
 uv run pytest                   # run the tests
-uv run pytest -m "not network"  # skip the test that downloads a tokenizer from the Hub
+uv run pytest -m "not network"  # skip the tests that download tokenizers from the Hub
 uv run ruff check . && uv run ruff format --check .
 uvx ty check src tests          # type check
 ```

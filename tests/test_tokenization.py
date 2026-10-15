@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from oellm_gigatokenize.tokenization import EncodedBatch, GigatokenEncoder, TokenizerError
-from tests.conftest import EOT
+from tests.conftest import EOS, EOT
 
 
 def batch(*documents: list[int]) -> EncodedBatch:
@@ -41,7 +41,7 @@ class TestGigatokenEncoder:
         return GigatokenEncoder.load(str(tiny_tokenizer_json))
 
     def test_vocab_size_and_fingerprint(self, encoder: GigatokenEncoder, tiny_tokenizer_json: Path) -> None:
-        assert encoder.vocab_size == 258
+        assert encoder.vocab_size == 259
         assert str(tiny_tokenizer_json) in encoder.fingerprint
 
     def test_encode_batch_matches_reference_tokenization(self, encoder: GigatokenEncoder) -> None:
@@ -57,6 +57,7 @@ class TestGigatokenEncoder:
 
     def test_token_to_id_for_special_token(self, encoder: GigatokenEncoder) -> None:
         assert encoder.token_to_id(EOT) == 257
+        assert encoder.token_to_id(EOS) == 258
 
     def test_token_to_id_rejects_multi_token_strings(self, encoder: GigatokenEncoder) -> None:
         with pytest.raises(TokenizerError, match="not a single token"):
@@ -73,3 +74,10 @@ def test_real_hub_tokenizer() -> None:
     assert encoder.vocab_size == 50257
     assert encoder.token_to_id(EOT) == 50256
     assert split(encoder.encode_batch(["Hello world"])) == [[15496, 995]]
+
+
+@pytest.mark.network
+def test_default_openeurollm_tokenizer() -> None:
+    encoder = GigatokenEncoder.load("openeurollm/tokenizer-256k-v2")
+    assert encoder.vocab_size == 262144
+    assert encoder.token_to_id("<eos>") == 2

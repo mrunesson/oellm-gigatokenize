@@ -6,6 +6,7 @@ import pytest
 
 from oellm_gigatokenize.cli import main
 from oellm_gigatokenize.indexed_dataset import read_documents
+from oellm_gigatokenize.tokenization import GigatokenEncoder, TokenizerError
 from tests.conftest import EOT, write_corpus
 
 CORPUS = [["ab c", "hello"], ["second file"], ["ab", "third file"]]
@@ -34,6 +35,12 @@ def test_end_to_end_with_gigatoken(tmp_path: Path, input_dir: Path, tiny_tokeniz
     assert all(doc[-1] == 257 for doc in result)
 
 
+def test_eos_is_the_default_eod_token(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:
+    output = tmp_path / "corpus"
+    assert main([str(input_dir), str(output), "-t", str(tiny_tokenizer_json), "-n", "1"]) == 0
+    assert all(doc[-1] == 258 for doc in documents(output))
+
+
 def test_eod_token_id(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:
     output = tmp_path / "corpus"
     assert main([str(input_dir), str(output), "-t", str(tiny_tokenizer_json), "-n", "1", "--eod-token-id", "0"]) == 0
@@ -42,7 +49,7 @@ def test_eod_token_id(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path
 
 def test_without_eod(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:
     output = tmp_path / "corpus"
-    assert main([str(input_dir), str(output), "-t", str(tiny_tokenizer_json), "-n", "3"]) == 0
+    assert main([str(input_dir), str(output), "-t", str(tiny_tokenizer_json), "-n", "3", "--no-eod"]) == 0
     assert documents(output)[1] == list(b"hello")
 
 
@@ -86,16 +93,28 @@ def test_missing_input_directory(tmp_path: Path, tiny_tokenizer_json: Path) -> N
 @pytest.mark.parametrize(
     "args",
     [
-        ["in", "out", "-n", "2"],  # missing tokenizer
         ["in", "out", "-t", "tok"],  # missing partitions
         ["in", "out", "-t", "tok", "-n", "0"],
         ["in", "out", "-t", "tok", "-n", "2", "--eod-token", "x", "--eod-token-id", "1"],
+        ["in", "out", "-t", "tok", "-n", "2", "--eod-token", "x", "--no-eod"],
     ],
 )
 def test_invalid_arguments_exit_with_usage_error(args: list[str]) -> None:
     with pytest.raises(SystemExit) as excinfo:
         main(args)
     assert excinfo.value.code == 2
+
+
+def test_tokenizer_defaults_to_openeurollm(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    loaded: list[str] = []
+
+    def fake_load(name: str) -> GigatokenEncoder:
+        loaded.append(name)
+        raise TokenizerError("stop here")
+
+    monkeypatch.setattr(GigatokenEncoder, "load", staticmethod(fake_load))
+    assert main([str(tmp_path), str(tmp_path / "out"), "-n", "1"]) == 1
+    assert loaded == ["openeurollm/tokenizer-256k-v2"]
 
 
 def test_runs_as_module() -> None:

@@ -13,6 +13,9 @@ from oellm_gigatokenize.tokenization import GigatokenEncoder, TokenizerError
 
 logger = logging.getLogger("oellm_gigatokenize")
 
+DEFAULT_TOKENIZER = "openeurollm/tokenizer-256k-v2"
+DEFAULT_EOD_TOKEN = "<eos>"
+
 
 def _positive_int(value: str) -> int:
     number = int(value)
@@ -39,8 +42,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "-t",
         "--tokenizer",
-        required=True,
-        help="HuggingFace Hub repo id (e.g. Qwen/Qwen3-8B) or path to a tokenizer.json / directory",
+        default=DEFAULT_TOKENIZER,
+        help="HuggingFace Hub repo id or path to a tokenizer.json / directory (default: %(default)s)",
     )
     parser.add_argument(
         "-n",
@@ -56,8 +59,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--pattern", default=DEFAULT_PATTERN, help="glob pattern for input files (default: %(default)s)"
     )
     eod = parser.add_mutually_exclusive_group()
-    eod.add_argument("--eod-token", help="token appended after every document, e.g. '<|endoftext|>'")
+    eod.add_argument(
+        "--eod-token",
+        help=f"token appended after every document (default: {DEFAULT_EOD_TOKEN})",
+    )
     eod.add_argument("--eod-token-id", type=int, help="token id appended after every document")
+    eod.add_argument("--no-eod", action="store_true", help="do not append an end-of-document token")
     parser.add_argument(
         "--batch-bytes",
         type=_positive_int,
@@ -75,6 +82,14 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_eod_id(args: argparse.Namespace, encoder: GigatokenEncoder) -> int | None:
+    if args.no_eod:
+        return None
+    if args.eod_token_id is not None:
+        return args.eod_token_id
+    return encoder.token_to_id(args.eod_token or DEFAULT_EOD_TOKEN)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     logging.basicConfig(
@@ -84,7 +99,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         encoder = GigatokenEncoder.load(args.tokenizer)
-        eod_id = encoder.token_to_id(args.eod_token) if args.eod_token is not None else args.eod_token_id
+        eod_id = _resolve_eod_id(args, encoder)
         config = PipelineConfig(
             input_dir=args.input_dir,
             output_prefix=args.output_prefix,
