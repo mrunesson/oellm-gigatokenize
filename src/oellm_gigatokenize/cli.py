@@ -120,10 +120,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
 
     logger.info(
-        "Wrote %d documents and %d tokens to %s.{bin,idx} (%d of %d partitions reused, %d empty documents skipped)",
+        "Wrote %d documents and %d tokens to %s.{bin,idx,json} in %.1fs "
+        "(%d of %d partitions reused, %d empty documents skipped)",
         summary.documents,
         summary.tokens,
         summary.output_prefix,
+        summary.total_seconds,
         summary.reused_partitions,
         summary.num_partitions,
         summary.empty_documents,

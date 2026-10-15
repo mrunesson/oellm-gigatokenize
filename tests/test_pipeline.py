@@ -1,11 +1,12 @@
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from oellm_gigatokenize.indexed_dataset import DatasetIndex, dataset_exists, idx_path, read_documents
-from oellm_gigatokenize.pipeline import NoInputFilesError, PipelineConfig, run
+from oellm_gigatokenize.pipeline import NoInputFilesError, PipelineConfig, run, summary_path
 from tests.conftest import ByteEncoder, write_corpus
 
 CORPUS = [
@@ -102,7 +103,7 @@ def test_removes_partitions_by_default(tmp_path: Path, input_dir: Path, byte_enc
     config = make_config(tmp_path, input_dir)
     run(config, byte_encoder)
     assert not config.partition_dir.exists()
-    assert sorted(p.name for p in config.output_prefix.parent.iterdir()) == ["data.bin", "data.idx"]
+    assert sorted(p.name for p in config.output_prefix.parent.iterdir()) == ["data.bin", "data.idx", "data.json"]
 
 
 def test_keep_partitions(tmp_path: Path, input_dir: Path, byte_encoder: ByteEncoder) -> None:
@@ -117,8 +118,9 @@ def test_keep_partitions(tmp_path: Path, input_dir: Path, byte_encoder: ByteEnco
         "part-00001.json",
     ]
     manifest = json.loads((tmp_path / "work" / "part-00000.json").read_text())
-    assert manifest["tokenizer"] == byte_encoder.fingerprint
-    assert len(manifest["files"]) > 0
+    assert manifest["inputs"]["tokenizer"] == byte_encoder.fingerprint
+    assert len(manifest["inputs"]["files"]) > 0
+    assert manifest["stats"]["documents"] > 0
 
 
 class TestResume:
@@ -134,6 +136,25 @@ class TestResume:
         assert rerun_encoder.calls == 0
         assert (tmp_path / "out" / "data.bin").read_bytes() == first_output
         assert summary.documents == len(DOCUMENTS)
+
+    def test_reused_partitions_keep_their_stats(self, tmp_path: Path, byte_encoder: ByteEncoder) -> None:
+        input_dir = tmp_path / "input"
+        write_corpus(input_dir, [["a", ""], ["b", "", ""]])
+        config = make_config(tmp_path, input_dir, keep_partitions=True)
+        first = run(config, byte_encoder)
+
+        second = run(config, ByteEncoder())
+
+        assert second.reused_partitions == 2
+        assert second.empty_documents == first.empty_documents == 3
+        assert [p.stats for p in second.partitions] == [p.stats for p in first.partitions]
+
+    def test_ignores_manifest_in_old_format(self, tmp_path: Path, input_dir: Path, byte_encoder: ByteEncoder) -> None:
+        config = make_config(tmp_path, input_dir, keep_partitions=True)
+        run(config, byte_encoder)
+        (config.partition_dir / "part-00000.json").write_text('{"files": []}')
+
+        assert run(config, ByteEncoder()).reused_partitions == 1
 
     def test_redoes_only_missing_partitions(self, tmp_path: Path, input_dir: Path, byte_encoder: ByteEncoder) -> None:
         config = make_config(tmp_path, input_dir, keep_partitions=True)
@@ -177,6 +198,69 @@ class TestResume:
         assert not dataset_exists(config.partition_dir / "part-00002")
         assert not dataset_exists(config.output_prefix)
         assert not list(config.partition_dir.glob("*.tmp"))
+
+
+class TestSummaryFile:
+    def test_written_next_to_dataset(self, tmp_path: Path, input_dir: Path, byte_encoder: ByteEncoder) -> None:
+        config = make_config(tmp_path, input_dir, eod_id=0, num_partitions=3, batch_bytes=1000)
+
+        summary = run(config, byte_encoder)
+
+        data = json.loads(summary_path(config.output_prefix).read_text())
+        assert summary_path(config.output_prefix) == tmp_path / "out" / "data.json"
+        assert data == summary.to_dict()
+        assert data["tool"]["name"] == "oellm-gigatokenize"
+        assert data["output"] == {
+            "bin": str((tmp_path / "out" / "data.bin").resolve()),
+            "idx": str((tmp_path / "out" / "data.idx").resolve()),
+            "dtype": "uint16",
+        }
+
+    def test_contains_config(self, tmp_path: Path, input_dir: Path, byte_encoder: ByteEncoder) -> None:
+        config = make_config(tmp_path, input_dir, eod_id=0, num_partitions=3, batch_bytes=1000, text_key="text")
+
+        config_data = run(config, byte_encoder).to_dict()["config"]
+
+        assert config_data == {
+            "input_dir": str(input_dir.resolve()),
+            "output_prefix": str((tmp_path / "out" / "data").resolve()),
+            "num_partitions": 3,
+            "text_key": "text",
+            "pattern": "*.jsonl.zst",
+            "batch_bytes": 1000,
+            "eod_id": 0,
+            "work_dir": str((tmp_path / "out" / "data.partitions").resolve()),
+            "keep_partitions": False,
+            "tokenizer": "bytes",
+            "vocab_size": 300,
+        }
+
+    def test_contains_totals_and_partitions(self, tmp_path: Path, input_dir: Path, byte_encoder: ByteEncoder) -> None:
+        data = run(make_config(tmp_path, input_dir, num_partitions=2), byte_encoder).to_dict()
+
+        totals = data["totals"]
+        assert totals["input_files"] == len(CORPUS)
+        assert totals["input_bytes"] == sum(f.stat().st_size for f in input_dir.iterdir())
+        assert totals["partitions"] == 2
+        assert totals["reused_partitions"] == 0
+        assert totals["documents"] == len(DOCUMENTS)
+        assert totals["tokens"] == sum(len(d.encode()) for d in DOCUMENTS)
+        assert totals["empty_documents"] == 0
+        partitions = data["partitions"]
+        assert [p["number"] for p in partitions] == [0, 1]
+        assert sum(len(p["input_files"]) for p in partitions) == len(CORPUS)
+        assert sum(p["documents"] for p in partitions) == len(DOCUMENTS)
+        assert all(not p["reused"] and p["seconds"] >= 0 for p in partitions)
+
+    def test_contains_timing(self, tmp_path: Path, input_dir: Path, byte_encoder: ByteEncoder) -> None:
+        before = datetime.now(UTC)
+        timing = run(make_config(tmp_path, input_dir), byte_encoder).to_dict()["timing"]
+        after = datetime.now(UTC)
+
+        started, finished = datetime.fromisoformat(timing["started_at"]), datetime.fromisoformat(timing["finished_at"])
+        assert before <= started <= finished <= after
+        assert 0 <= timing["merge_seconds"] <= timing["total_seconds"] <= (after - before).total_seconds()
+        assert timing["tokens_per_second"] > 0
 
 
 def test_no_input_files(tmp_path: Path, byte_encoder: ByteEncoder) -> None:

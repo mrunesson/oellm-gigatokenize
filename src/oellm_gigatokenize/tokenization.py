@@ -39,6 +39,11 @@ class Encoder(Protocol):
     """Anything that can tokenize a batch of documents."""
 
     @property
+    def name(self) -> str:
+        """The tokenizer's name or path, as given by the user."""
+        ...
+
+    @property
     def vocab_size(self) -> int: ...
 
     @property
@@ -68,6 +73,10 @@ class GigatokenEncoder:
         except Exception as exc:  # gigatoken raises a variety of exception types
             raise TokenizerError(f"could not load tokenizer {name_or_path!r}: {exc}") from exc
         return cls(tokenizer, name_or_path)
+
+    @property
+    def name(self) -> str:
+        return self._name
 
     @property
     def vocab_size(self) -> int:

@@ -1,3 +1,4 @@
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -33,6 +34,10 @@ def test_end_to_end_with_gigatoken(tmp_path: Path, input_dir: Path, tiny_tokeniz
     assert result[0] == [256, ord(" "), ord("c"), 257]
     assert result[3] == [256, 257]
     assert all(doc[-1] == 257 for doc in result)
+    summary = json.loads((tmp_path / "out" / "corpus.json").read_text())
+    assert summary["config"]["tokenizer"] == str(tiny_tokenizer_json)
+    assert summary["config"]["eod_id"] == 257
+    assert summary["totals"]["documents"] == 5
 
 
 def test_eos_is_the_default_eod_token(tmp_path: Path, input_dir: Path, tiny_tokenizer_json: Path) -> None:

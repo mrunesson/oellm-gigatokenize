@@ -10,6 +10,11 @@ Megatron-LM `bin/idx` (`MMapIndexedDataset`) dataset.
 2. **Partition** the files into `--num-partitions` contiguous groups of roughly equal compressed size.
 3. **Tokenize** one partition at a time. Each file is decompressed as a stream and tokenized in batches of about `--batch-bytes` of text. Tokens are written straight to that partition's `part-NNNNN.bin/.idx`, so memory use depends on the batch size, not on the corpus size.
 4. **Merge** the partitions, in order, into `<output_prefix>.bin` and `<output_prefix>.idx`. Partitions are then deleted unless `--keep-partitions` is given.
+5. **Summarize** the run in `<output_prefix>.json`. It records:
+   * `config`: every setting used, including the tokenizer and its vocabulary size.
+   * `timing`: start and finish time (UTC), total and merge seconds, and tokens per second.
+   * `totals`: input files and bytes, partitions, documents, tokens and empty documents.
+   * `partitions`: input files, counts and tokenization time for each partition, and whether it was reused from an earlier run.
 
 Each partition is written to temporary files and only moved into place when it is complete. Next to it goes a manifest recording its input files, tokenizer and settings. If a run is interrupted, re-running the same command reuses every finished partition whose manifest still matches.
 

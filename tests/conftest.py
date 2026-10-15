@@ -35,6 +35,7 @@ class ByteEncoder:
 
     def __init__(self, vocab_size: int = 300, name: str = "bytes") -> None:
         self.vocab_size = vocab_size
+        self.name = name
         self.fingerprint = f"fake:{name}"
         self.calls = 0
 

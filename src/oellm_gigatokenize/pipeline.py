@@ -5,11 +5,16 @@ import logging
 import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
+from oellm_gigatokenize import __version__
 from oellm_gigatokenize.indexed_dataset import (
     DatasetWriter,
+    bin_path,
     dataset_exists,
+    idx_path,
     merge_datasets,
     optimal_dtype,
     remove_dataset,
@@ -45,17 +50,40 @@ class PipelineConfig:
             return self.work_dir
         return self.output_prefix.with_name(self.output_prefix.name + ".partitions")
 
+    def to_dict(self) -> dict[str, Any]:
+        """JSON-serializable form, with paths made absolute."""
+        values = asdict(self)
+        for key, value in values.items():
+            if isinstance(value, Path):
+                values[key] = str(value.resolve())
+        values["work_dir"] = str(self.partition_dir.resolve())
+        return values
+
 
 def manifest_path(prefix: Path) -> Path:
     return prefix.with_name(prefix.name + ".json")
+
+
+def summary_path(output_prefix: Path) -> Path:
+    """Where the run summary is written: ``<output_prefix>.json``."""
+    return output_prefix.with_name(output_prefix.name + ".json")
+
+
+@dataclass(slots=True)
+class PartitionStats:
+    documents: int = 0
+    tokens: int = 0
+    empty_documents: int = 0
+    seconds: float = 0.0
 
 
 @dataclass(frozen=True, slots=True)
 class PartitionManifest:
     """Everything that determines a partition's contents.
 
-    Stored next to each finished partition so that a re-run can reuse partitions that
-    are still valid and redo those whose inputs or settings changed.
+    Stored next to each finished partition, together with the partition's stats, so
+    that a re-run can reuse partitions that are still valid (and still report their
+    stats) and redo those whose inputs or settings changed.
     """
 
     files: list[tuple[str, int]]
@@ -64,36 +92,109 @@ class PartitionManifest:
     eod_id: int | None
     dtype: str
 
-    def save(self, prefix: Path) -> None:
-        manifest_path(prefix).write_text(json.dumps(asdict(self), indent=2))
+    def save(self, prefix: Path, stats: PartitionStats) -> None:
+        content = {"inputs": asdict(self), "stats": asdict(stats)}
+        manifest_path(prefix).write_text(json.dumps(content, indent=2))
 
-    def matches(self, prefix: Path) -> bool:
+    def load_matching_stats(self, prefix: Path) -> PartitionStats | None:
+        """The stored stats if a finished partition built from these inputs exists at ``prefix``."""
         path = manifest_path(prefix)
         if not (path.is_file() and dataset_exists(prefix)):
-            return False
+            return None
         try:
             stored = json.loads(path.read_text())
-        except json.JSONDecodeError:
-            return False
-        return stored == json.loads(json.dumps(asdict(self)))
+            if stored["inputs"] != json.loads(json.dumps(asdict(self))):
+                return None
+            return PartitionStats(**stored["stats"])
+        except (json.JSONDecodeError, KeyError, TypeError):
+            return None
 
 
 @dataclass(slots=True)
-class PartitionStats:
-    documents: int = 0
-    tokens: int = 0
-    empty_documents: int = 0
+class PartitionResult:
+    number: int
+    files: list[InputFile]
+    reused: bool
+    stats: PartitionStats
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "number": self.number,
+            "reused": self.reused,
+            "input_files": [str(f.path.resolve()) for f in self.files],
+            "input_bytes": sum(f.size for f in self.files),
+            **asdict(self.stats),
+        }
 
 
 @dataclass(slots=True)
 class PipelineSummary:
-    output_prefix: Path
-    num_partitions: int
-    reused_partitions: int
+    config: PipelineConfig
+    tokenizer: str
+    vocab_size: int
+    dtype: str
+    started_at: datetime
+    finished_at: datetime
+    total_seconds: float
+    merge_seconds: float
     documents: int
     tokens: int
-    empty_documents: int
-    partition_stats: list[PartitionStats] = field(default_factory=list)
+    partitions: list[PartitionResult] = field(default_factory=list)
+
+    @property
+    def output_prefix(self) -> Path:
+        return self.config.output_prefix
+
+    @property
+    def num_partitions(self) -> int:
+        return len(self.partitions)
+
+    @property
+    def reused_partitions(self) -> int:
+        return sum(p.reused for p in self.partitions)
+
+    @property
+    def empty_documents(self) -> int:
+        return sum(p.stats.empty_documents for p in self.partitions)
+
+    def to_dict(self) -> dict[str, Any]:
+        input_files = sum(len(p.files) for p in self.partitions)
+        input_bytes = sum(f.size for p in self.partitions for f in p.files)
+        return {
+            "tool": {"name": "oellm-gigatokenize", "version": __version__},
+            "output": {
+                "bin": str(bin_path(self.output_prefix).resolve()),
+                "idx": str(idx_path(self.output_prefix).resolve()),
+                "dtype": self.dtype,
+            },
+            "config": {
+                **self.config.to_dict(),
+                "tokenizer": self.tokenizer,
+                "vocab_size": self.vocab_size,
+            },
+            "timing": {
+                "started_at": self.started_at.isoformat(),
+                "finished_at": self.finished_at.isoformat(),
+                "total_seconds": self.total_seconds,
+                "merge_seconds": self.merge_seconds,
+                "tokens_per_second": self.tokens / self.total_seconds if self.total_seconds > 0 else None,
+            },
+            "totals": {
+                "input_files": input_files,
+                "input_bytes": input_bytes,
+                "partitions": self.num_partitions,
+                "reused_partitions": self.reused_partitions,
+                "documents": self.documents,
+                "tokens": self.tokens,
+                "empty_documents": self.empty_documents,
+            },
+            "partitions": [p.to_dict() for p in self.partitions],
+        }
+
+    def write(self, path: Path) -> None:
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(self.to_dict(), indent=2) + "\n")
+        tmp.replace(path)
 
 
 def tokenize_partition(
@@ -106,6 +207,7 @@ def tokenize_partition(
 
     Only one batch of text and its tokens is held in memory at a time.
     """
+    started = time.perf_counter()
     stats = PartitionStats()
     dtype = optimal_dtype(encoder.vocab_size)
     with DatasetWriter(prefix, dtype) as writer:
@@ -121,11 +223,14 @@ def tokenize_partition(
                 stats.documents += non_empty.num_documents
                 stats.tokens += len(non_empty.tokens)
         writer.finalize()
+    stats.seconds = time.perf_counter() - started
     return stats
 
 
 def run(config: PipelineConfig, encoder: Encoder) -> PipelineSummary:
-    """Run the full pipeline and return a summary of what was produced."""
+    """Run the full pipeline, write the summary to ``<output_prefix>.json`` and return it."""
+    started_at = datetime.now(UTC)
+    started = time.perf_counter()
     if config.eod_id is not None and not 0 <= config.eod_id < encoder.vocab_size:
         raise ValueError(f"eod id {config.eod_id} is outside the vocabulary (size {encoder.vocab_size})")
 
@@ -146,8 +251,7 @@ def run(config: PipelineConfig, encoder: Encoder) -> PipelineSummary:
     )
 
     prefixes: list[Path] = []
-    all_stats: list[PartitionStats] = []
-    reused = 0
+    results: list[PartitionResult] = []
     for number, partition_files in enumerate(partitions):
         prefix = partition_dir / f"part-{number:05d}"
         prefixes.append(prefix)
@@ -159,41 +263,48 @@ def run(config: PipelineConfig, encoder: Encoder) -> PipelineSummary:
             dtype=str(dtype),
         )
         label = f"partition {number + 1}/{len(partitions)}"
-        if manifest.matches(prefix):
+        stored_stats = manifest.load_matching_stats(prefix)
+        if stored_stats is not None:
             logger.info("Reusing existing %s at %s", label, prefix)
-            reused += 1
+            results.append(PartitionResult(number, partition_files, reused=True, stats=stored_stats))
             continue
 
-        started = time.perf_counter()
         stats = tokenize_partition(partition_files, prefix, encoder, config)
-        manifest.save(prefix)
-        all_stats.append(stats)
-        elapsed = time.perf_counter() - started
+        manifest.save(prefix, stats)
+        results.append(PartitionResult(number, partition_files, reused=False, stats=stats))
         logger.info(
             "Finished %s: %d files, %d documents, %d tokens in %.1fs (%.0f tokens/s)",
             label,
             len(partition_files),
             stats.documents,
             stats.tokens,
-            elapsed,
-            stats.tokens / elapsed if elapsed > 0 else 0.0,
+            stats.seconds,
+            stats.tokens / stats.seconds if stats.seconds > 0 else 0.0,
         )
 
     logger.info("Merging %d partitions into %s", len(prefixes), config.output_prefix)
+    merge_started = time.perf_counter()
     merged = merge_datasets(prefixes, config.output_prefix)
+    merge_seconds = time.perf_counter() - merge_started
 
     if not config.keep_partitions:
         _remove_partitions(prefixes, partition_dir)
 
-    return PipelineSummary(
-        output_prefix=config.output_prefix,
-        num_partitions=len(partitions),
-        reused_partitions=reused,
+    summary = PipelineSummary(
+        config=config,
+        tokenizer=encoder.name,
+        vocab_size=encoder.vocab_size,
+        dtype=str(dtype),
+        started_at=started_at,
+        finished_at=datetime.now(UTC),
+        total_seconds=time.perf_counter() - started,
+        merge_seconds=merge_seconds,
         documents=merged.num_sequences,
         tokens=merged.num_tokens,
-        empty_documents=sum(s.empty_documents for s in all_stats),
-        partition_stats=all_stats,
+        partitions=results,
     )
+    summary.write(summary_path(config.output_prefix))
+    return summary
 
 
 def _remove_partitions(prefixes: Sequence[Path], partition_dir: Path) -> None:
