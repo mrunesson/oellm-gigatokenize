@@ -24,15 +24,20 @@ class EncodedBatch:
     def num_documents(self) -> int:
         return len(self.lengths)
 
-    def drop_empty(self) -> "EncodedBatch":
-        """Remove documents without tokens (tokens are untouched since they have none)."""
-        return EncodedBatch(tokens=self.tokens, lengths=self.lengths[self.lengths > 0])
+    @property
+    def num_empty(self) -> int:
+        """The number of documents without tokens."""
+        return int(np.count_nonzero(self.lengths == 0))
 
     def with_eod(self, eod_id: int) -> "EncodedBatch":
-        """Append ``eod_id`` to the end of every document."""
-        ends = np.cumsum(self.lengths)
+        """Append ``eod_id`` to the end of every non-empty document.
+
+        Like Megatron's ``preprocess_data.py``, an empty document gets no EOD and stays empty.
+        """
+        non_empty = self.lengths > 0
+        ends = np.cumsum(self.lengths)[non_empty]
         tokens = np.insert(self.tokens, ends, np.asarray(eod_id, dtype=self.tokens.dtype))
-        return EncodedBatch(tokens=tokens, lengths=self.lengths + 1)
+        return EncodedBatch(tokens=tokens, lengths=self.lengths + non_empty)
 
 
 class Encoder(Protocol):

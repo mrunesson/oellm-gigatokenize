@@ -130,7 +130,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     logger.info(
         "Wrote %d documents and %d tokens from %d files to %s in %.1fs "
-        "(%d files and %d of %d partitions reused, %d empty documents skipped)",
+        "(%d files and %d of %d partitions reused, %d of them empty)",
         summary.documents,
         summary.tokens,
         len(summary.files),

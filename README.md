@@ -43,7 +43,7 @@ uv run oellm-gigatokenize INPUT_DIR OUTPUT_DIR --num-partitions 8 --workers 4
 Notes:
 
 * The token dtype follows Megatron's rule: `uint16` when the vocabulary has fewer than 65,500 tokens, otherwise `int32`.
-* Every document is stored as its own sequence. Documents that tokenize to nothing are skipped.
+* Every document is stored as its own sequence. A document that tokenizes to nothing gets no sequence and no end-of-document token, but still an entry in the index's document list. This matches Megatron's `preprocess_data.py`, so the `.idx` files are byte-identical to Megatron's.
 * Gigatoken matches special-token strings (such as `<|endoftext|>`) that appear in the raw text and encodes them as special tokens.
 * Every partition decompresses the whole file, so a file is decompressed n times, while each row is parsed and tokenized only once.
 * Gigatoken already tokenizes each batch on all CPU cores. Extra workers mainly overlap decompression and JSON parsing with tokenization.

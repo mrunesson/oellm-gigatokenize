@@ -99,6 +99,18 @@ def test_empty_dataset(tmp_path: Path) -> None:
     assert as_lists(tmp_path / "ds") == []
 
 
+def test_empty_documents_have_no_sequence(tmp_path: Path) -> None:
+    prefix = tmp_path / "ds"
+    write_dataset(prefix, [[], [1, 2], [], [], [3], []])
+
+    parsed = parse_megatron_index(idx_path(prefix))
+
+    assert parsed["lengths"] == [2, 1]
+    assert parsed["pointers"] == [0, 4]
+    assert parsed["documents"] == [0, 0, 1, 1, 1, 2, 2]
+    assert as_lists(prefix) == [[1, 2], [3]]
+
+
 def test_unfinalized_writer_leaves_no_dataset(tmp_path: Path) -> None:
     prefix = tmp_path / "ds"
     writer = DatasetWriter(prefix, np.dtype(np.uint16))
@@ -160,6 +172,19 @@ class TestMerge:
         for suffix in (".bin", ".idx"):
             assert (tmp_path / f"merged{suffix}").read_bytes() == (tmp_path / f"direct{suffix}").read_bytes()
 
+    def test_matches_writing_everything_at_once_with_empty_documents(self, tmp_path: Path) -> None:
+        documents = [[1], [], [2, 3], [], [], [4], []]
+        write_dataset(tmp_path / "direct", documents)
+        write_dataset(tmp_path / "a", documents[:2])
+        write_dataset(tmp_path / "b", documents[2:3])
+        write_dataset(tmp_path / "c", documents[3:5])
+        write_dataset(tmp_path / "d", documents[5:])
+
+        merge_datasets([tmp_path / name for name in "abcd"], tmp_path / "merged")
+
+        for suffix in (".bin", ".idx"):
+            assert (tmp_path / f"merged{suffix}").read_bytes() == (tmp_path / f"direct{suffix}").read_bytes()
+
     def test_preserves_multi_sequence_documents(self, tmp_path: Path) -> None:
         index = DatasetIndex(np.dtype(np.uint16), np.array([1, 1, 1], np.int32), np.array([0, 2, 3], np.int64))
         for name in ("a", "b"):
@@ -213,3 +238,20 @@ def test_compatible_with_megatron_reader(tmp_path: Path) -> None:
     write_dataset(tmp_path / "ds", documents)
     dataset = indexed_dataset.IndexedDataset(str(tmp_path / "ds"))
     assert [dataset[i].tolist() for i in range(len(dataset))] == documents
+
+
+def test_byte_identical_to_megatron_builder(tmp_path: Path) -> None:
+    """Write the same documents, including empty ones, with Megatron's builder when it is installed."""
+    indexed_dataset = pytest.importorskip("megatron.core.datasets.indexed_dataset")
+    torch = pytest.importorskip("torch")
+    documents = [[1, 2, 3], [], [4], [], [5, 6], []]
+    write_dataset(tmp_path / "ours", documents)
+
+    builder = indexed_dataset.IndexedDatasetBuilder(str(bin_path(tmp_path / "theirs")), dtype=np.uint16)
+    for doc in documents:
+        # preprocess_data.py adds every document, with no sequence lengths when it has no tokens.
+        builder.add_document(torch.tensor(doc, dtype=torch.int64), [len(doc)] if doc else [])
+    builder.finalize(str(idx_path(tmp_path / "theirs")))
+
+    for suffix in (".bin", ".idx"):
+        assert (tmp_path / f"ours{suffix}").read_bytes() == (tmp_path / f"theirs{suffix}").read_bytes()

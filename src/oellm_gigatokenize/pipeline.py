@@ -50,6 +50,8 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_BATCH_BYTES = 256 * 1024 * 1024
 SUMMARY_NAME = "_summary.json"
+# Bump when the same inputs produce different output files, so older results are not reused.
+OUTPUT_FORMAT = 2
 
 
 class NoInputFilesError(FileNotFoundError):
@@ -140,6 +142,7 @@ class FileJob:
     def inputs(self) -> dict[str, Any]:
         """Everything that determines the output's contents."""
         return {
+            "output_format": OUTPUT_FORMAT,
             "file": str(self.input.path.resolve()),
             "size": self.input.size,
             "num_partitions": self.config.num_partitions,
@@ -185,13 +188,12 @@ def tokenize_partition(
             if stop is not None and stop.is_set():
                 raise CancelledError
             batch = encoder.encode_batch(texts)
-            non_empty = batch.drop_empty()
-            stats.empty_documents += batch.num_documents - non_empty.num_documents
             if config.eod_id is not None:
-                non_empty = non_empty.with_eod(config.eod_id)
-            writer.add_documents(non_empty.tokens, non_empty.lengths)
-            stats.documents += non_empty.num_documents
-            stats.tokens += len(non_empty.tokens)
+                batch = batch.with_eod(config.eod_id)
+            writer.add_documents(batch.tokens, batch.lengths)
+            stats.documents += batch.num_documents
+            stats.empty_documents += batch.num_empty
+            stats.tokens += len(batch.tokens)
         writer.finalize()
     stats.seconds = time.perf_counter() - started
     write_json(_json_path(prefix), {"inputs": inputs, "result": asdict(stats)})

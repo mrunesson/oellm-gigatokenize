@@ -21,18 +21,20 @@ class TestEncodedBatch:
         with pytest.raises(ValueError, match="lengths"):
             EncodedBatch(tokens=np.array([1, 2]), lengths=np.array([1]))
 
-    def test_drop_empty(self) -> None:
-        result = batch([], [1, 2], [], [3], []).drop_empty()
-        assert split(result) == [[1, 2], [3]]
-        assert result.num_documents == 2
+    def test_num_empty(self) -> None:
+        result = batch([], [1, 2], [], [3], [])
+        assert result.num_documents == 5
+        assert result.num_empty == 3
 
     def test_with_eod_appends_to_every_document(self) -> None:
         result = batch([1, 2], [3], [4, 5, 6]).with_eod(9)
         assert split(result) == [[1, 2, 9], [3, 9], [4, 5, 6, 9]]
         assert result.tokens.dtype == np.uint32
 
-    def test_with_eod_on_empty_documents(self) -> None:
-        assert split(batch([], [1]).with_eod(9)) == [[9], [1, 9]]
+    def test_with_eod_leaves_empty_documents_empty(self) -> None:
+        result = batch([], [1], [], [2, 3], []).with_eod(9)
+        assert result.lengths.tolist() == [0, 2, 0, 3, 0]
+        assert result.tokens.tolist() == [1, 9, 2, 3, 9]
 
 
 class TestGigatokenEncoder:

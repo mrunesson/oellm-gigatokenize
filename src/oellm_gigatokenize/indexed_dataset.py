@@ -10,13 +10,15 @@ A dataset with prefix ``foo`` consists of two files:
       version          uint64    1
       dtype code       uint8     see ``_DTYPE_CODES``
       sequence count   uint64    N
-      document count   uint64    D (= N + 1 here, one sequence per document)
+      document count   uint64    D (number of documents + 1)
       sequence_lengths int32[N]  tokens per sequence
       sequence_pointers int64[N] byte offset of each sequence in the .bin file
       document_indices int64[D]  sequence index where each document starts, plus the end
 
-All integers are little-endian. Every document written by this tool is a single
-sequence, so ``document_indices`` is ``[0, 1, ..., N]``.
+All integers are little-endian. Like Megatron's ``preprocess_data.py``, this tool
+writes every document as a single sequence, except that a document without tokens
+gets no sequence but still an entry in ``document_indices``. Documents
+``[a], [], [b]`` therefore give ``document_indices = [0, 1, 1, 2]``.
 """
 
 import shutil
@@ -88,14 +90,13 @@ class DatasetIndex:
     document_indices: npt.NDArray[np.int64]
 
     @classmethod
-    def from_lengths(cls, dtype: np.dtype, sequence_lengths: npt.ArrayLike) -> Self:
-        """Build an index where every sequence is its own document."""
-        lengths = np.asarray(sequence_lengths, dtype=np.int32)
-        return cls(
-            dtype=np.dtype(dtype),
-            sequence_lengths=lengths,
-            document_indices=np.arange(len(lengths) + 1, dtype=np.int64),
-        )
+    def from_document_lengths(cls, dtype: np.dtype, document_lengths: npt.ArrayLike) -> Self:
+        """Build an index with one sequence per document, or none for a document without tokens."""
+        lengths = np.asarray(document_lengths, dtype=np.int32)
+        non_empty = lengths > 0
+        document_indices = np.zeros(len(lengths) + 1, dtype=np.int64)
+        np.cumsum(non_empty, dtype=np.int64, out=document_indices[1:])
+        return cls(dtype=np.dtype(dtype), sequence_lengths=lengths[non_empty], document_indices=document_indices)
 
     @property
     def num_sequences(self) -> int:
@@ -179,7 +180,10 @@ class DatasetWriter:
         self._bin = self._bin_tmp.open("wb")
 
     def add_documents(self, tokens: npt.NDArray[np.integer], lengths: npt.NDArray[np.integer]) -> None:
-        """Append documents given as one flat token array plus the length of each document."""
+        """Append documents given as one flat token array plus the length of each document.
+
+        A document of length 0 is recorded in the index without a sequence.
+        """
         lengths = np.asarray(lengths)
         if int(lengths.sum()) != len(tokens):
             raise ValueError("sum of lengths does not match the number of tokens")
@@ -192,7 +196,7 @@ class DatasetWriter:
         """Write the index and move both files into their final location."""
         self._bin.close()
         lengths = np.concatenate(self._lengths) if self._lengths else np.empty(0, np.int32)
-        index = DatasetIndex.from_lengths(self.dtype, lengths)
+        index = DatasetIndex.from_document_lengths(self.dtype, lengths)
         index.write(self._idx_tmp)
         self._bin_tmp.replace(bin_path(self.prefix))
         self._idx_tmp.replace(idx_path(self.prefix))

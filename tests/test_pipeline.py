@@ -204,14 +204,20 @@ def test_rejects_eod_outside_vocabulary(tmp_path: Path, input_dir: Path, byte_en
         run(make_config(tmp_path, input_dir, eod_id=byte_encoder.vocab_size), byte_encoder)
 
 
-def test_skips_empty_documents(tmp_path: Path, byte_encoder: ByteEncoder) -> None:
+def test_keeps_empty_documents_without_sequences(tmp_path: Path, byte_encoder: ByteEncoder) -> None:
     input_dir = tmp_path / "input"
-    write_corpus(input_dir, [["a", "", "b"], [""]])
-    config = make_config(tmp_path, input_dir, num_partitions=2)
+    write_corpus(input_dir, [["a", "", "b", "", "", "c"], [""]])
+    config = make_config(tmp_path, input_dir, num_partitions=2, eod_id=0)
     summary = run(config, byte_encoder)
-    assert decoded(config.output_dir / "shard-000") == ["a", "b"]  # partition 0: "a", "b"; partition 1: ""
-    assert decoded(config.output_dir / "shard-001") == []
-    assert summary.empty_documents == 2
+
+    # Partition 0 gets "a", "b", "" and partition 1 gets "", "", "c". Empty documents get no EOD.
+    first = DatasetIndex.read(idx_path(config.output_dir / "shard-000"))
+    assert first.sequence_lengths.tolist() == [2, 2, 2]
+    assert first.document_indices.tolist() == [0, 1, 2, 2, 2, 2, 3]
+    assert decoded(config.output_dir / "shard-000", eod=0) == ["a", "b", "c"]
+    assert DatasetIndex.read(idx_path(config.output_dir / "shard-001")).document_indices.tolist() == [0, 0]
+    assert summary.documents == 7
+    assert summary.empty_documents == 4
 
 
 def test_uses_int32_for_large_vocabularies(tmp_path: Path, input_dir: Path) -> None:
