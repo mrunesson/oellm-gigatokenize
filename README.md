@@ -50,6 +50,16 @@ Notes:
 * New files are started only while fewer partitions than workers are in progress, so only a few files' partitions are on disk at any time.
 * Memory use grows with the number of workers, roughly `workers × batch-bytes` of text plus its tokens.
 
+## Running on a Slurm cluster
+
+Submit from the repository root, with your own time limit:
+
+```bash
+sbatch --time=02:00:00 --account=PROJECT scripts/tokenize.sbatch INPUT_DIR OUTPUT_DIR [tool options...]
+```
+
+The job takes a whole node and runs the tool with `uv run`. Options after the two directories go to `oellm-gigatokenize`. For the time limit: a 27,828,971,364-byte input file became 10,058,027,380 tokens in 600 s, about 46 MB of input per second, or roughly 1 hour per 167 GB. If the job runs out of time, submit it again, and finished files are reused.
+
 ## Development
 
 ```bash
