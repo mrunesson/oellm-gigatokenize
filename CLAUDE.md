@@ -18,6 +18,8 @@ uv run oellm-gigatokenize INPUT_DIR OUT_DIR -n 8 -w 4   # run the CLI
 
 `oellm-gigatokenize` tokenizes a directory of `*.jsonl.zst` files with Gigatoken. Each input file becomes one Megatron-LM `MMapIndexedDataset` in the output directory (`a/b.jsonl.zst` → `OUT/a/b.bin`, `.idx`, `.json`), plus `OUT/_summary.json` for the run. `-n` deals each file's documents round robin over n partitions. Defaults: tokenizer `openeurollm/tokenizer-256k-v2`, `<eos>` appended after every document (`--no-eod` disables it), 1 partition per file, 1 worker.
 
+Partitioning exists mainly to compare results with older datasets made with Megatron's `preprocess_data.py --partitions`, which also deals rows round robin and merges in partition order. Byte-identical output for a given n is the priority, not speed. Gigatoken's `encode_batch` already runs on a process-wide Rust (rayon) pool using all cores, so the recommended number of threads per file is 1. Don't add per-file thread parallelism for speed.
+
 ## Architecture
 
 The data flow is `cli.main` → `pipeline.run(config, encoder)`. Each file is split into `num_partitions` tasks plus a merge task, run by an executor from `executor.make_executor` (`InlineExecutor` in the main thread for `workers == 1`, else a `ThreadPoolExecutor`):
